@@ -14,6 +14,59 @@
   >Limit results to the {{ $.Namespace }} namespace</a>
   {{ end }}
 
+  {{/*  resource quota*/}}
+  {{ if gt (len $.ResourceQuotas) 0 }}
+    <details open>
+      <summary>Resource Quota</summary>
+      <div class="detailInfo --deployment verticalRhythm">
+        <h3>
+          <span class="badge detailBadge --deployment">resource quota</span>
+        </h3>
+        <div class="layoutLineup">
+          {{ range $resourceQuota := $.ResourceQuotas }}
+            <section class="detailInfo --qos verticalRhythm">
+              <div class="layoutCluster --start">
+                <h5>Name: {{ $resourceQuota.ResourceQuotaName }}</h5>
+              </div>
+              <table class="compTable callout">
+                <caption class="visually-hidden">
+                  Display resourcequota's status present in the namespace
+                </caption>
+                <thead>
+                <tr>
+                  <td></td>
+                  <th scope="col">Available</th>
+                  <td></td>
+                  <td></td>
+                  <td></td>
+                  <td></td>
+                  <td></td>
+                  <th scope="col">Used</th>
+                </tr>
+                </thead>
+                <tbody>
+                {{ range $resource, $value := $resourceQuota.Hard }}
+                  <tr>
+                    <th scope="row">{{ $resource }}</th>
+                    <td>{{ $value }}</td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td>{{index $resourceQuota.Used $resource }}</td>
+                  </tr>
+                {{ end }}
+                </tbody>
+              </table>
+            </section>
+          {{ end }}
+        </div>
+      </div>
+    </details>
+  {{ end }}
+  {{/*End resource quota*/}}
+
   <details open>
     <summary>Workloads</summary>
 

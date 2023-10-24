@@ -20,6 +20,7 @@ import (
 
 	controllerUtils "github.com/fairwindsops/controller-utils/pkg/controller"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -41,8 +42,9 @@ type Summary struct {
 }
 
 type namespaceSummary struct {
-	Namespace       string                     `json:"namespace"`
-	Workloads       map[string]workloadSummary `json:"workloads"`
+	Namespace       string                          `json:"namespace"`
+	Workloads       map[string]workloadSummary      `json:"workloads"`
+	ResourceQuotas  map[string]ResourceQuotaSummary `json:"resourceQuotas"`
 	BasePath        string
 	IsOnlyNamespace bool
 }
@@ -73,6 +75,12 @@ type ContainerSummary struct {
 	BurstableCostInt  int
 }
 
+type ResourceQuotaSummary struct {
+	ResourceQuotaName string `json:"resourceQuotaName"`
+	Used              map[string]string
+	Hard              map[string]string
+}
+
 // Summarizer represents a source of generating a summary of VPAs
 type Summarizer struct {
 	options
@@ -82,6 +90,9 @@ type Summarizer struct {
 
 	// cached map of vpa name -> workload
 	workloadForVPANamed map[string]*controllerUtils.Workload
+
+	//cached list of resourcequotas
+	resourceQuotas []v1.ResourceQuota
 }
 
 // NewSummarizer returns a Summarizer for all goldilocks managed VPAs in all Namespaces
@@ -117,13 +128,14 @@ func (s Summarizer) GetSummary() (Summary, error) {
 	// then add that namespace by default to the blank summary
 	if s.namespace != namespaceAllNamespaces {
 		summary.Namespaces[s.namespace] = namespaceSummary{
-			Namespace: s.namespace,
-			Workloads: map[string]workloadSummary{},
+			Namespace:      s.namespace,
+			Workloads:      map[string]workloadSummary{},
+			ResourceQuotas: map[string]ResourceQuotaSummary{},
 		}
 	}
 
 	// cached vpas and workloads
-	if s.vpas == nil || s.workloadForVPANamed == nil {
+	if s.vpas == nil || s.workloadForVPANamed == nil || s.resourceQuotas == nil {
 		err := s.Update()
 		if err != nil {
 			return summary, err
@@ -131,103 +143,129 @@ func (s Summarizer) GetSummary() (Summary, error) {
 	}
 
 	// nothing to summarize
-	if len(s.vpas) <= 0 {
+	if len(s.vpas) <= 0 && len(s.resourceQuotas) <= 0 {
 		return summary, nil
 	}
 
-	for _, vpa := range s.vpas {
-		klog.V(8).Infof("Analyzing vpa: %v", vpa.Name)
+	if len(s.vpas) > 0 {
 
-		// get or create the namespaceSummary for this VPA's namespace
-		namespace := vpa.Namespace
-		var nsSummary namespaceSummary
-		if val, ok := summary.Namespaces[namespace]; ok {
-			nsSummary = val
-		} else {
-			nsSummary = namespaceSummary{
-				Namespace: namespace,
-				Workloads: map[string]workloadSummary{},
-			}
-			summary.Namespaces[namespace] = nsSummary
-		}
+		for _, vpa := range s.vpas {
+			klog.V(8).Infof("Analyzing vpa: %v", vpa.Name)
 
-		wSummary := workloadSummary{
-			ControllerName: vpa.Spec.TargetRef.Name,
-			ControllerType: vpa.Spec.TargetRef.Kind,
-			Containers:     map[string]ContainerSummary{},
-		}
-
-		workload, ok := s.workloadForVPANamed[vpa.Name]
-		if !ok {
-			klog.Errorf("no matching Workloads found for VPA/%s", vpa.Name)
-			continue
-		}
-
-		if vpa.Status.Recommendation == nil {
-			klog.V(2).Infof("Empty status on %v", wSummary.ControllerName)
-			nsSummary.Workloads[wSummary.ControllerName] = wSummary
-			summary.Namespaces[nsSummary.Namespace] = nsSummary
-			continue
-		}
-		if len(vpa.Status.Recommendation.ContainerRecommendations) <= 0 {
-			klog.V(2).Infof("No container recommendations found in the %v vpa.", wSummary.ControllerName)
-			nsSummary.Workloads[wSummary.ControllerName] = wSummary
-			summary.Namespaces[nsSummary.Namespace] = nsSummary
-			continue
-		}
-
-		// get the full set of excluded containers for this workload
-		excludedContainers := (sets.Set[string]{}).Union(s.excludedContainers)
-		if val, exists := workload.TopController.GetAnnotations()[utils.WorkloadExcludeContainersAnnotation]; exists {
-			excludedContainers.Insert(strings.Split(val, ",")...)
-		}
-
-	CONTAINER_REC_LOOP:
-		for _, containerRecommendation := range vpa.Status.Recommendation.ContainerRecommendations {
-			if excludedContainers.Has(containerRecommendation.ContainerName) {
-				klog.V(2).Infof("Excluding container %s/%s/%s", wSummary.ControllerType, wSummary.ControllerName, containerRecommendation.ContainerName)
-				continue CONTAINER_REC_LOOP
+			// get or create the namespaceSummary for this VPA's namespace
+			namespace := vpa.Namespace
+			var nsSummary namespaceSummary
+			if val, ok := summary.Namespaces[namespace]; ok {
+				nsSummary = val
+			} else {
+				nsSummary = namespaceSummary{
+					Namespace: namespace,
+					Workloads: map[string]workloadSummary{},
+				}
+				summary.Namespaces[namespace] = nsSummary
 			}
 
-			var cSummary ContainerSummary
-			workloadPodSpecUnstructured, workloadPodSpecFound, err := unstructured.NestedMap(workload.TopController.UnstructuredContent(), "spec", "template", "spec")
-			if err != nil {
-				klog.Errorf("unable to parse spec.template.spec from unstructured workload. Namespace: '%s', Kind: '%s', Name: '%s'", workload.TopController.GetNamespace(), workload.TopController.GetKind(), workload.TopController.GetName())
-				continue CONTAINER_REC_LOOP
-			}
-			if !workloadPodSpecFound {
-				klog.Errorf("no spec.template.spec field from unstructured workload. Namespace: '%s', Kind: '%s', Name: '%s'", workload.TopController.GetNamespace(), workload.TopController.GetKind(), workload.TopController.GetName())
-				continue CONTAINER_REC_LOOP
+			wSummary := workloadSummary{
+				ControllerName: vpa.Spec.TargetRef.Name,
+				ControllerType: vpa.Spec.TargetRef.Kind,
+				Containers:     map[string]ContainerSummary{},
 			}
 
-			var workloadPodSpec corev1.PodSpec
-			err = runtime.DefaultUnstructuredConverter.FromUnstructured(workloadPodSpecUnstructured, &workloadPodSpec)
-			if err != nil {
-				klog.Errorf("unable to convert unstructured pod spec to PodSpec struct. Namespace: '%s', Kind: '%s', Name: '%s'", workload.TopController.GetNamespace(), workload.TopController.GetKind(), workload.TopController.GetName())
-				continue CONTAINER_REC_LOOP
+			workload, ok := s.workloadForVPANamed[vpa.Name]
+			if !ok {
+				klog.Errorf("no matching Workloads found for VPA/%s", vpa.Name)
+				continue
 			}
 
-			for _, c := range workloadPodSpec.Containers {
-				// find the matching container on the workload
-				if c.Name == containerRecommendation.ContainerName {
-					cSummary = ContainerSummary{
-						ContainerName:  containerRecommendation.ContainerName,
-						UpperBound:     utils.FormatResourceList(containerRecommendation.UpperBound),
-						LowerBound:     utils.FormatResourceList(containerRecommendation.LowerBound),
-						Target:         utils.FormatResourceList(containerRecommendation.Target),
-						UncappedTarget: utils.FormatResourceList(containerRecommendation.UncappedTarget),
-						Limits:         utils.FormatResourceList(c.Resources.Limits),
-						Requests:       utils.FormatResourceList(c.Resources.Requests),
-					}
-					klog.V(6).Infof("Resources for %s/%s/%s: Requests: %v Limits: %v", wSummary.ControllerType, wSummary.ControllerName, c.Name, cSummary.Requests, cSummary.Limits)
-					wSummary.Containers[cSummary.ContainerName] = cSummary
+			if vpa.Status.Recommendation == nil {
+				klog.V(2).Infof("Empty status on %v", wSummary.ControllerName)
+				nsSummary.Workloads[wSummary.ControllerName] = wSummary
+				summary.Namespaces[nsSummary.Namespace] = nsSummary
+				continue
+			}
+			if len(vpa.Status.Recommendation.ContainerRecommendations) <= 0 {
+				klog.V(2).Infof("No container recommendations found in the %v vpa.", wSummary.ControllerName)
+				nsSummary.Workloads[wSummary.ControllerName] = wSummary
+				summary.Namespaces[nsSummary.Namespace] = nsSummary
+				continue
+			}
+
+			// get the full set of excluded containers for this workload
+			excludedContainers := (sets.Set[string]{}).Union(s.excludedContainers)
+			if val, exists := workload.TopController.GetAnnotations()[utils.WorkloadExcludeContainersAnnotation]; exists {
+				excludedContainers.Insert(strings.Split(val, ",")...)
+			}
+
+		CONTAINER_REC_LOOP:
+			for _, containerRecommendation := range vpa.Status.Recommendation.ContainerRecommendations {
+				if excludedContainers.Has(containerRecommendation.ContainerName) {
+					klog.V(2).Infof("Excluding container %s/%s/%s", wSummary.ControllerType, wSummary.ControllerName, containerRecommendation.ContainerName)
 					continue CONTAINER_REC_LOOP
 				}
+
+				var cSummary ContainerSummary
+				workloadPodSpecUnstructured, workloadPodSpecFound, err := unstructured.NestedMap(workload.TopController.UnstructuredContent(), "spec", "template", "spec")
+				if err != nil {
+					klog.Errorf("unable to parse spec.template.spec from unstructured workload. Namespace: '%s', Kind: '%s', Name: '%s'", workload.TopController.GetNamespace(), workload.TopController.GetKind(), workload.TopController.GetName())
+					continue CONTAINER_REC_LOOP
+				}
+				if !workloadPodSpecFound {
+					klog.Errorf("no spec.template.spec field from unstructured workload. Namespace: '%s', Kind: '%s', Name: '%s'", workload.TopController.GetNamespace(), workload.TopController.GetKind(), workload.TopController.GetName())
+					continue CONTAINER_REC_LOOP
+				}
+
+				var workloadPodSpec corev1.PodSpec
+				err = runtime.DefaultUnstructuredConverter.FromUnstructured(workloadPodSpecUnstructured, &workloadPodSpec)
+				if err != nil {
+					klog.Errorf("unable to convert unstructured pod spec to PodSpec struct. Namespace: '%s', Kind: '%s', Name: '%s'", workload.TopController.GetNamespace(), workload.TopController.GetKind(), workload.TopController.GetName())
+					continue CONTAINER_REC_LOOP
+				}
+
+				for _, c := range workloadPodSpec.Containers {
+					// find the matching container on the workload
+					if c.Name == containerRecommendation.ContainerName {
+						cSummary = ContainerSummary{
+							ContainerName:  containerRecommendation.ContainerName,
+							UpperBound:     utils.FormatResourceList(containerRecommendation.UpperBound),
+							LowerBound:     utils.FormatResourceList(containerRecommendation.LowerBound),
+							Target:         utils.FormatResourceList(containerRecommendation.Target),
+							UncappedTarget: utils.FormatResourceList(containerRecommendation.UncappedTarget),
+							Limits:         utils.FormatResourceList(c.Resources.Limits),
+							Requests:       utils.FormatResourceList(c.Resources.Requests),
+						}
+						klog.V(6).Infof("Resources for %s/%s/%s: Requests: %v Limits: %v", wSummary.ControllerType, wSummary.ControllerName, c.Name, cSummary.Requests, cSummary.Limits)
+						wSummary.Containers[cSummary.ContainerName] = cSummary
+						continue CONTAINER_REC_LOOP
+					}
+				}
+			}
+
+			// update summary maps
+			nsSummary.Workloads[wSummary.ControllerName] = wSummary
+			summary.Namespaces[nsSummary.Namespace] = nsSummary
+		}
+	}
+
+	if len(s.resourceQuotas) > 0 {
+		//Get resourceQuota details only, If the namespace is filtered
+		if s.namespace != namespaceAllNamespaces {
+			for _, resourceQuota := range s.resourceQuotas {
+				rqSummary := ResourceQuotaSummary{
+					ResourceQuotaName: resourceQuota.Name,
+					Used:              map[string]string{},
+					Hard:              map[string]string{},
+				}
+				for resource, value := range resourceQuota.Status.Hard {
+					rqSummary.Hard[string(resource)] = value.String()
+				}
+				for resource, value := range resourceQuota.Status.Used {
+					rqSummary.Used[string(resource)] = value.String()
+				}
+				//Update summary maps
+				summary.Namespaces[s.namespace].ResourceQuotas[rqSummary.ResourceQuotaName] = rqSummary
+
 			}
 		}
-		// update summary maps
-		nsSummary.Workloads[wSummary.ControllerName] = wSummary
-		summary.Namespaces[nsSummary.Namespace] = nsSummary
 	}
 
 	// Indicate if this is the only namespace we are returning. This allows us
@@ -252,6 +290,12 @@ func (s *Summarizer) Update() error {
 	}
 
 	err = s.updateWorkloads()
+	if err != nil {
+		klog.Error(err.Error())
+		return err
+	}
+
+	err = s.listResourceQuotas()
 	if err != nil {
 		klog.Error(err.Error())
 		return err
@@ -282,6 +326,15 @@ func (s Summarizer) listVPAs(listOptions metav1.ListOptions) ([]vpav1.VerticalPo
 		return nil, err
 	}
 	return vpas.Items, nil
+}
+
+func (s *Summarizer) listResourceQuotas() error {
+	resourceQuotas, err := s.kubeClient.Client.CoreV1().ResourceQuotas(s.namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	s.resourceQuotas = resourceQuotas.Items
+	return nil
 }
 
 func getVPAListOptionsForLabels(vpaLabels map[string]string) metav1.ListOptions {
