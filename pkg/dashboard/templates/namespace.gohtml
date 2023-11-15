@@ -15,9 +15,10 @@
   {{ end }}
 
   {{/*  resource quota*/}}
-  {{ if gt (len $.ResourceQuotas) 0 }}
+
     <details open>
       <summary>Resource Quota</summary>
+      {{ if gt (len $.ResourceQuotas) 0 }}
       <div class="detailInfo --deployment verticalRhythm">
         <h3>
           <span class="badge detailBadge --deployment">resource quota</span>
@@ -42,6 +43,12 @@
                   <td></td>
                   <td></td>
                   <th scope="col">Used</th>
+                  <td></td>
+                  <td></td>
+                  <td></td>
+                  <td></td>
+                  <td></td>
+                  <th scope="col">Percentage(%)</th>
                 </tr>
                 </thead>
                 <tbody>
@@ -55,6 +62,12 @@
                     <td></td>
                     <td></td>
                     <td>{{index $resourceQuota.Used $resource }}</td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td><center>{{index $resourceQuota.Usagepercentage $resource }}%</center></td>
                   </tr>
                 {{ end }}
                 </tbody>
@@ -63,8 +76,11 @@
           {{ end }}
         </div>
       </div>
+      {{ else }}
+        <p class="detailInfo --empty">No ResourceQuota found in this namespace.</p>
+      {{ end }}
     </details>
-  {{ end }}
+
   {{/*End resource quota*/}}
 
   <details open>
