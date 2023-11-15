@@ -16,6 +16,8 @@ package summary
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"strings"
 
 	controllerUtils "github.com/fairwindsops/controller-utils/pkg/controller"
@@ -47,6 +49,7 @@ type namespaceSummary struct {
 	ResourceQuotas  map[string]ResourceQuotaSummary `json:"resourceQuotas"`
 	BasePath        string
 	IsOnlyNamespace bool
+	TotalUsageCost  float64
 }
 
 type workloadSummary struct {
@@ -79,6 +82,7 @@ type ResourceQuotaSummary struct {
 	ResourceQuotaName string `json:"resourceQuotaName"`
 	Used              map[string]string
 	Hard              map[string]string
+	Usagepercentage   map[string]string
 }
 
 // Summarizer represents a source of generating a summary of VPAs
@@ -172,6 +176,7 @@ func (s Summarizer) GetSummary() (Summary, error) {
 			}
 
 			workload, ok := s.workloadForVPANamed[vpa.Name]
+
 			if !ok {
 				klog.Errorf("no matching Workloads found for VPA/%s", vpa.Name)
 				continue
@@ -249,17 +254,32 @@ func (s Summarizer) GetSummary() (Summary, error) {
 	if len(s.resourceQuotas) > 0 {
 		//Get resourceQuota details only, If the namespace is filtered
 		if s.namespace != namespaceAllNamespaces {
+			klog.V(2).Infof("ResourceQuota is available in namespace '%s'", s.namespace)
 			for _, resourceQuota := range s.resourceQuotas {
 				rqSummary := ResourceQuotaSummary{
 					ResourceQuotaName: resourceQuota.Name,
 					Used:              map[string]string{},
 					Hard:              map[string]string{},
+					Usagepercentage:   map[string]string{},
 				}
 				for resource, value := range resourceQuota.Status.Hard {
 					rqSummary.Hard[string(resource)] = value.String()
+
 				}
 				for resource, value := range resourceQuota.Status.Used {
 					rqSummary.Used[string(resource)] = value.String()
+				}
+
+				for hResource, hValue := range resourceQuota.Status.Hard {
+					for uResource, uValue := range resourceQuota.Status.Used {
+						if hResource == uResource {
+							used := uValue.AsApproximateFloat64()
+							hard := hValue.AsApproximateFloat64()
+							//rqSummary.Usagepercentage[string(hResource)] = fmt.Sprintf("%.2f", ((used * 100) / hard))
+							rqSummary.Usagepercentage[string(hResource)] = fmt.Sprintf("%.1f", roundFloat(((used*100)/hard), 1))
+
+						}
+					}
 				}
 				//Update summary maps
 				summary.Namespaces[s.namespace].ResourceQuotas[rqSummary.ResourceQuotaName] = rqSummary
@@ -392,4 +412,10 @@ func (s Summarizer) listWorkloads() ([]controllerUtils.Workload, error) {
 	}
 
 	return workloads, nil
+}
+
+// roundFloat returns round value of floating numbers
+func roundFloat(val float64, precision uint) float64 {
+	ratio := math.Pow(10, float64(precision))
+	return math.Round(val*ratio) / ratio
 }
